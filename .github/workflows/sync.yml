@@ -1,0 +1,104 @@
+﻿name: Sync Upstream
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: "0 0 * * 5"
+  workflow_dispatch:
+    # 允许手动触发
+    inputs:
+      upstream_repo:
+        description: "上游仓库(格式: owner/repo)"
+        required: true
+        default: "matsuzaka-yuki/Mizuki"
+      upstream_branch:
+        description: "上游分支"
+        required: true
+        default: "master"
+      target_branch:
+        description: "本地分支"
+        required: true
+        default: "master"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Variables
+        id: config
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "TARGET_BRANCH=master" >> $GITHUB_ENV
+            echo "UPSTREAM_REPO=matsuzaka-yuki/Mizuki" >> $GITHUB_ENV
+            echo "UPSTREAM_BRANCH=master" >> $GITHUB_ENV
+          else
+            echo "TARGET_BRANCH=${{ inputs.target_branch }}" >> $GITHUB_ENV
+            echo "UPSTREAM_REPO=${{ inputs.upstream_repo }}" >> $GITHUB_ENV
+            echo "UPSTREAM_BRANCH=${{ inputs.upstream_branch }}" >> $GITHUB_ENV
+          fi
+
+      - name: Checkout target repo
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Sync Process
+        run: |
+          # Print env variables
+          echo "Syncing from: $UPSTREAM_REPO ($UPSTREAM_BRANCH)"
+          echo "Target branch: $TARGET_BRANCH"
+
+          # Setup Upstream
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch upstream $UPSTREAM_BRANCH
+
+          # Check upstream changes
+          if git merge-base --is-ancestor upstream/$UPSTREAM_BRANCH HEAD; then
+            echo "✅ No updates found. Local branch is already up-to-date or ahead of upstream."
+            exit 0
+          fi
+
+          # Try Fast-Forward
+          if git merge --ff-only upstream/$UPSTREAM_BRANCH; then
+            echo "✅ Fast-forward successful!"
+            git push origin $TARGET_BRANCH
+            exit 0
+          fi
+
+          # Try Merge with Custom Message
+          echo "🔄 Diverged history. Attempting merge with custom message..."
+
+          # Custom Merge Message
+          MERGE_MSG="🔀 sync: Merge updates from $UPSTREAM_REPO"
+
+          if git merge upstream/$UPSTREAM_BRANCH -m "$MERGE_MSG"; then
+            echo "✅ Merge successful!"
+            git push origin $TARGET_BRANCH
+            exit 0
+          else
+            echo "❌ Merge conflict detected!"
+            echo "⚠️ Aborting the failed merge to clean up the workspace..."
+            git merge --abort
+          fi
+
+          CONFLICT_BRANCH="upstream"
+
+          echo "🛠 Creating upstream branch: $CONFLICT_BRANCH"
+
+          git checkout -b $CONFLICT_BRANCH upstream/$UPSTREAM_BRANCH
+
+          git push origin $CONFLICT_BRANCH -f
+
+          echo "⚠️ Sync failed due to conflicts."
+          echo "⚠️ Created branch '$CONFLICT_BRANCH' with upstream changes."
+
+          exit 1
